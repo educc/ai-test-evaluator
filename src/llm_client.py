@@ -165,6 +165,21 @@ class LMStudioClient:
                 json=payload,
                 timeout=self.timeout
             )
+            
+            # Check if the response is an error and log the details
+            if not response.ok:
+                try:
+                    error_data = response.json()
+                    error_msg = f"LM Studio API request failed: {response.status_code} {response.reason} for url: {url}"
+                    if 'error' in error_data:
+                        error_msg += f"\nServer error: {error_data['error']}"
+                        if isinstance(error_data['error'], dict) and 'message' in error_data['error']:
+                            error_msg += f" - {error_data['error']['message']}"
+                    raise requests.RequestException(error_msg)
+                except ValueError:
+                    # If we can't parse the error response as JSON
+                    raise requests.RequestException(f"LM Studio API request failed: {response.status_code} {response.reason} for url: {url}\nResponse: {response.text[:500]}")
+            
             response.raise_for_status()
             
             data = response.json()
