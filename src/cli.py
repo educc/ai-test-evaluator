@@ -53,7 +53,7 @@ def list_models(base_url: Optional[str] = None) -> None:
         sys.exit(1)
 
 
-def run_benchmark(model: str, base_url: Optional[str] = None) -> None:
+def run_benchmark(model: str, base_url: Optional[str] = None, iterations: int = 1) -> None:
     """Run benchmark evaluation using the specified model."""
     try:
         # Read the prompt from prompt.md
@@ -72,69 +72,101 @@ def run_benchmark(model: str, base_url: Optional[str] = None) -> None:
             
         log.info(f"Running benchmark with model: {model}")
         log.info(f"Prompt size: {len(prompt_content)} characters")
+        log.info(f"Number of iterations: {iterations}")
         
         # Use longer timeout for large prompts
         client_kwargs['timeout'] = 120  # 2 minutes timeout
         
+        iteration_scores = []
+        
         with LMStudioClient(**client_kwargs) as client:
-            # Create the message for the LLM
-            messages = [Message(role=Role.USER, content=prompt_content)]
-            
-            # Get response from the model
-            log.info("Sending prompt to model (this may take a while for large prompts)...")
-            try:
-                response_content = client.simple_chat(
-                    user_message=prompt_content,
-                    model=model,
-                    temperature=0.1
-                )
-            except Exception as e:
-                log.error(f"Chat completion failed: {e}")
-                log.error("This could be due to:")
-                log.error("1. Model context length limitations")
-                log.error("2. LM Studio server timeout")
-                log.error("3. Model not properly loaded")
-                raise
+            for iteration in range(1, iterations + 1):
+                log.info("=" * 60)
+                log.info(f"ITERATION {iteration}/{iterations}")
+                log.info("=" * 60)
+                
+                # Create the message for the LLM
+                messages = [Message(role=Role.USER, content=prompt_content)]
+                
+                # Get response from the model
+                log.info("Sending prompt to model (this may take a while for large prompts)...")
+                try:
+                    response_content = client.simple_chat(
+                        user_message=prompt_content,
+                        model=model,
+                        temperature=0.1
+                    )
+                except Exception as e:
+                    log.error(f"Chat completion failed for iteration {iteration}: {e}")
+                    log.error("This could be due to:")
+                    log.error("1. Model context length limitations")
+                    log.error("2. LM Studio server timeout")
+                    log.error("3. Model not properly loaded")
+                    raise
 
-            log.debug(f"Received response from model: {response_content}")
+                log.debug(f"Received response from model: {response_content}")
 
-            # Parse the response to extract Q1: through Q16: lines
-            lines = response_content.strip().split('\n')
-            answer_lines = []
-            
-            for line in lines:
-                line = line.strip()
-                if line.startswith('Q') and ':' in line:
-                    # Extract just the answer part after the colon
-                    answer = line.split(':', 1)[1].strip()
-                    answer_lines.append(line)
+                # Parse the response to extract Q1: through Q16: lines
+                lines = response_content.strip().split('\n')
+                answer_lines = []
+                
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith('Q') and ':' in line:
+                        # Extract just the answer part after the colon
+                        answer = line.split(':', 1)[1].strip()
+                        answer_lines.append(line)
 
-            log.debug(f"Answer lines are:\n{answer_lines}")
+                log.debug(f"Answer lines are:\n{answer_lines}")
 
-            # Take the last 16 answers (in case there are duplicates or extras)
-            if len(answer_lines) >= len(GOLD):
-                answer_lines = answer_lines[-len(GOLD):]
-            else:
-                log.warning(f"Only found {len(answer_lines)} answers, expected {len(GOLD)}")
-                # Pad with empty strings if needed
-                while len(answer_lines) < len(GOLD):
-                    answer_lines.append("")
+                # Take the last 16 answers (in case there are duplicates or extras)
+                if len(answer_lines) >= len(GOLD):
+                    answer_lines = answer_lines[-len(GOLD):]
+                else:
+                    log.warning(f"Only found {len(answer_lines)} answers, expected {len(GOLD)}")
+                    # Pad with empty strings if needed
+                    while len(answer_lines) < len(GOLD):
+                        answer_lines.append("")
+                
+                # Evaluate using match_line
+                log.info(f"Answer lines: {answer_lines}")
+                log.info("Evaluating responses...")
+                scores = []
+                for i, (answer, gold) in enumerate(zip(answer_lines, GOLD), 1):
+                    score = match_line((answer, gold))
+                    scores.append(score)
+                    log.info(f"Q{i}: {score:.2f}% - '{answer}' vs '{gold}'")
+                
+                # Calculate iteration score
+                iteration_score = sum(scores) / len(scores) if scores else 0.0
+                iteration_scores.append(iteration_score)
+                
+                log.info("-" * 60)
+                log.info(f"Iteration {iteration} Score: {iteration_score:.2f}%")
+                log.info(f"Correct answers: {sum(1 for s in scores if s == 100.0)}/{len(scores)}")
             
-            # Evaluate using match_line
-            log.info(f"Answer lines: {answer_lines}")
-            log.info("Evaluating responses...")
-            scores = []
-            for i, (answer, gold) in enumerate(zip(answer_lines, GOLD), 1):
-                score = match_line((answer, gold))
-                scores.append(score)
-                log.info(f"Q{i}: {score:.2f}% - '{answer}' vs '{gold}'")
-            
-            # Calculate final score
-            final_score = sum(scores) / len(scores) if scores else 0.0
+            # Calculate and display final results
             log.info("=" * 60)
-            log.info(f"Final Score: {final_score:.2f}%")
+            log.info("FINAL RESULTS")
+            log.info("=" * 60)
+            
+            if len(iteration_scores) > 1:
+                log.info("Individual iteration scores:")
+                for i, score in enumerate(iteration_scores, 1):
+                    log.info(f"  Iteration {i}: {score:.2f}%")
+                log.info("-" * 60)
+            
+            average_score = sum(iteration_scores) / len(iteration_scores) if iteration_scores else 0.0
+            log.info(f"Average Score: {average_score:.2f}%")
             log.info(f"Model: {model}")
-            log.info(f"Correct answers: {sum(1 for s in scores if s == 100.0)}/{len(scores)}")
+            log.info(f"Iterations: {iterations}")
+            
+            if len(iteration_scores) > 1:
+                min_score = min(iteration_scores)
+                max_score = max(iteration_scores)
+                log.info(f"Best Score: {max_score:.2f}%")
+                log.info(f"Worst Score: {min_score:.2f}%")
+                log.info(f"Score Range: {max_score - min_score:.2f}%")
             
     except Exception as e:
         log.error(f"Error running benchmark: {e}")
@@ -182,6 +214,13 @@ def create_bench_subparser(subparsers) -> None:
         default=None,
         help='Base URL for the LM Studio API (default: http://localhost:1234/v1)'
     )
+    
+    bench_parser.add_argument(
+        '-n',
+        type=int,
+        default=1,
+        help='Number of iterations to run the benchmark (default: 1)'
+    )
 
 
 def main() -> None:
@@ -223,7 +262,7 @@ def main() -> None:
     
     # Handle bench command
     elif args.command == 'bench':
-        run_benchmark(args.model, args.base_url)
+        run_benchmark(args.model, args.base_url, args.n)
 
 
 if __name__ == '__main__':
